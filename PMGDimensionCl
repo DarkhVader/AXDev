@@ -1,0 +1,294 @@
+class PmgDimensionCl
+{
+    DimensionAttribute                  dimensionAttribute;
+    DimensionAttributeValue             dimensionAttributeValue;
+    DimensionAttributeValueSet          dimensionAttributeValueSet;
+    DimensionAttributeValueSetItem      dimensionAttributeValueSetItem;
+
+    container                           cAttrRecId;
+    container                           cAttrName;
+
+    container                           cRecId;
+    container                           cDisplayValue;
+
+    int                                 i;
+
+    private void fillContainers()
+    {
+        ;
+    
+        cRecId = conNull();
+        cDisplayValue = conNull();
+        for (i = 1; i <= conLen(cAttrRecId); i++)
+        {
+            cRecId += 0;
+            cDisplayValue += "";
+        }
+    
+        while select dimensionAttributeValueSetItem
+            where   dimensionAttributeValueSetItem.DimensionAttributeValueSet   == dimensionAttributeValueSet.RecId
+        {
+            dimensionAttributeValue = DimensionAttributeValue::find(dimensionAttributeValueSetItem.DimensionAttributeValue);
+            i = conFind(cAttrRecId, dimensionAttributeValue.DimensionAttribute);
+            if (i)
+            {
+                    cRecId = conPoke(cRecId, i, dimensionAttributeValueSetItem.RecId);
+                    cDisplayValue = conPoke(cDisplayValue, i, dimensionAttributeValueSetItem.DisplayValue);
+            }
+        }
+    
+    }
+
+    public container getDimName()
+    {
+        ;
+    
+        return cAttrName;
+    }
+
+    public container getDisplayValue()
+    {
+        ;
+    
+        return cDisplayValue;
+    }
+
+    public container getRecContainer()
+    {
+        ;
+    
+        return cRecId;
+    }
+
+    public void new()
+    {
+        ;
+    
+        cAttrRecId = conNull();
+        cAttrName = conNull();
+        while select dimensionAttribute
+          where dimensionAttribute.Type != DimensionAttributeType::MainAccount
+        {
+            cAttrRecId += dimensionAttribute.RecId;
+            cAttrName += dimensionAttribute.Name;
+        }
+    
+    }
+
+    public void setDimensionDefault(DimensionDefault _dimensionDefault)
+    {
+        ;
+    
+        dimensionAttributeValueSet = DimensionAttributeValueSet::find(_dimensionDefault);
+        this.fillContainers();
+    
+    }
+
+    public void setLedgerDimension(LedgerDimensionAccount _ledgerDimensionAccount)
+    {
+        ;
+    
+        dimensionAttributeValueSet = DimensionAttributeValueSet::find(LedgerDimensionFacade::getDefaultDimensionFromLedgerDimension(_ledgerDimensionAccount));
+        this.fillContainers();
+    
+    }
+
+    public static server DimensionDefault createDimensionDefault_FromContainer(container _dimensionAttributeValues)
+    {
+        int                         a;
+        DimensionAttributeValue     dimensionAttributeValue;
+    
+        DimensionAttributeValueSetStorage dimensionAttributeValueSetStorage = new DimensionAttributeValueSetStorage();
+    
+        for (a=1;a <= conLen(_dimensionAttributeValues); a++)
+        {
+            dimensionAttributeValue = conPeek(_dimensionAttributeValues,a);
+            dimensionAttributeValueSetStorage.addItemValues(dimensionAttributeValue.DimensionAttribute, dimensionAttributeValue.RecId, dimensionAttributeValue.HashKey);
+        }
+        return dimensionAttributeValueSetStorage.save();
+    }
+
+    public static server DimensionAttributeSetItem findDimensionAttributeSetItem(DimensionAttribute _dimensionsAttribute)
+    {
+        DimensionAttributeSetItem dimensionAttributeSetItem;
+    
+        select firstonly RecId from dimensionAttributeSetItem
+            where dimensionAttributeSetItem.DimensionAttributeSet   == DimensionCache::getDimensionAttributeSetForLedger()
+                && dimensionAttributeSetItem.DimensionAttribute     == _dimensionsAttribute.RecId;
+    
+        return dimensionAttributeSetItem;
+    }
+
+    public static server DimensionValue findDimensionsSetItemValue(DimensionAttribute _dimensionAttribute, DimensionDefault _dimensionsDefault)
+    {
+        DimensionAttributeValueSet      valueSet;
+        DimensionAttributeValueSetItem  setItem;
+        DimensionAttributeValue         attributevalue;
+    
+        select firstonly RecId from valueSet
+            where valueSet.RecId == _dimensionsDefault
+                join setItem
+                    where setItem.DimensionAttributeValueSet == valueSet.RecId
+                        join RecId , DimensionAttribute from attributevalue
+                            where attributevalue.RecId == setItem.DimensionAttributeValue
+                               && attributevalue.DimensionAttribute == _dimensionAttribute.RecId;
+    
+    
+        return setItem.DisplayValue;
+    }
+
+    static server container getDimensionAttributesFromEnumratedSet (DimensionEnumeration _dimensionEnumeration)
+    {
+        DimensionAttributeSet       dimensionAttributeSet;
+        DimensionAttributeSetItem   dimensionAttributeSetItem;
+        DimensionAttribute          dimensionAttribute;
+        container                   dimensionAttributeRecIds;
+    
+        while select RecId from dimensionAttributeSet
+            where dimensionAttributeSet.RecId == _dimensionEnumeration
+            join DimensionAttribute, DimensionAttributeSet from dimensionAttributeSetItem
+                where dimensionAttributeSetItem.DimensionAttributeSet == dimensionAttributeSet.RecId
+                    && dimensionAttributeSetItem.EnumerationValue
+                join RecId from dimensionAttribute
+                    where dimensionAttribute.RecId == dimensionAttributeSetItem.DimensionAttribute
+        {
+            dimensionAttributeRecIds = conIns(dimensionAttributeRecIds, conLen(dimensionAttributeRecIds) + 1, dimensionAttribute.RecId);
+        }
+    
+        return dimensionAttributeRecIds;
+    }
+
+    static container  getDisplayValueAndName(RecId _dimensionRecid,str _dimensionAttributeName)
+    {
+        DimensionAttributeValueCombination  dimAttrValueComb;
+        DimensionStorage        dimensionStorage;
+        DimensionStorageSegment segment;
+        int                     segmentCount, segmentIndex;
+        int                     hierarchyCount, hierarchyIndex;
+        str                     segmentName, segmentDescription;
+        SysDim                  segmentValue;
+    
+        ;
+    
+        dimAttrValueComb = DimensionAttributeValueCombination::find(_dimensionRecid);
+        dimensionStorage = DimensionStorage::findById(_dimensionRecid);
+    
+        if (dimensionStorage == null)
+        {
+            throw error("@SYS83964");
+        }
+    
+    
+    
+        // Get hierarchy count
+    
+        hierarchyCount = dimensionStorage.hierarchyCount();
+        for(hierarchyIndex = 1; hierarchyIndex <= hierarchyCount; hierarchyIndex++)
+    
+        {
+            segmentCount = dimensionStorage.segmentCountForHierarchy(hierarchyIndex);
+            for (segmentIndex = 1; segmentIndex <= segmentCount; segmentIndex++)
+    
+            {
+                segment = dimensionStorage.getSegmentForHierarchy(hierarchyIndex, segmentIndex);
+                if (segment.parmDimensionAttributeValueId() != 0)
+                {
+                    segmentName = DimensionAttribute::find(DimensionAttributeValue::find(segment.parmDimensionAttributeValueId()).DimensionAttribute).Name;
+                    segmentValue        = segment.parmDisplayValue();
+                    segmentDescription  = segment.getName();
+    
+                    if (segmentName == _dimensionAttributeName)
+                    return [segmentValue,segmentDescription];
+                }
+    
+            }
+    
+        }
+        return ['',''];
+    }
+
+    static server container splitUpDefaultDimIntoSelectedAttributes(container _attributeRecIds, DimensionDefault _dimensionDefault)
+    {
+        container               dimensionAttributeValues;
+        int                     i;
+        DimensionAttribute      dimensionAttribute;
+        DimensionAttributeValue dimensionAttributeValue;
+        DimensionValue          dimensionValue;
+        RecId                   attriButeRecId;
+    
+        for (i=1; i <= conLen(_attributeRecIds); i ++)
+        {
+            attriButeRecId = conPeek(_attributeRecIds,i);
+            dimensionAttribute = DimensionAttribute::find(attriButeRecId);
+    
+            if (PMGDimensionCl::findDimensionAttributeSetItem(dimensionAttribute))
+            {
+                dimensionValue = PMGDimensionCl::findDimensionsSetItemValue(dimensionAttribute,_dimensionDefault);
+    
+                if (dimensionValue)
+                {
+                    dimensionAttributeValue = DimensionAttributeValue::findByDimensionAttributeAndValueNoError(dimensionAttribute,dimensionValue,false, false);
+    
+                    if (dimensionAttributeValue)
+                    {
+                        dimensionAttributeValues = conIns(dimensionAttributeValues,conLen(dimensionAttributeValues)+1,dimensionAttributeValue);
+                    }
+                }
+            }
+        }
+    
+        return dimensionAttributeValues;
+    }
+
+    static server public DimensionDefault tableDimension(Common _c, DimensionDefault _d)
+    {
+        DimensionAttribute dimensionAttribute;
+        DimensionAttributeValue dimensionAttributeValue;
+        DimensionAttributeSetItem dimensionAttributeSetItem;
+        DimensionAttributeValueSetStorage dimensionAttributeValueSetStorage;
+        DimensionDefault cDimensionDefault;
+        DimensionDefault ret;
+        ;
+    
+        ret = _d;
+    
+        select firstonly RecId from dimensionAttribute
+            where dimensionAttribute.BackingEntityTableId == _c.TableId
+            join firstonly RecId from dimensionAttributeSetItem
+                where dimensionAttributeSetItem.DimensionAttributeSet == DimensionCache::getDimensionAttributeSetForLedger()
+                   && dimensionAttributeSetItem.DimensionAttribute == dimensionAttribute.RecId;
+        if (dimensionAttributeSetItem.RecId != 0)
+        {
+            dimensionAttributeValue = DimensionAttributeValue::findByDimensionAttributeAndEntityInst(dimensionAttribute.RecId, _c.RecId, false, true);
+            if (dimensionAttributeValue.RecId != 0)
+            {
+                dimensionAttributeValueSetStorage = new DimensionAttributeValueSetStorage();
+                dimensionAttributeValueSetStorage.addItemValues(dimensionAttributeValue.DimensionAttribute, dimensionAttributeValue.RecId, dimensionAttributeValue.HashKey);
+                cDimensionDefault = dimensionAttributeValueSetStorage.save();
+                if (cDimensionDefault != 0)
+                {
+                    ret = LedgerDimensionDefaultFacade::serviceMergeDefaultDimensions(cDimensionDefault, _d);
+                }
+            }
+        }
+    
+        return ret;
+    }
+
+    static server boolean validateMandatoryDimensionAttributes(DimensionDefault _dimensionDefault, container _attributeRecids)
+    {
+        boolean ret = true;
+        int i;
+    
+        for (i = 1; i <= conLen(_attributeRecids); i++)
+        {
+            if (conLen(PMGDimensionCl::splitUpDefaultDimIntoSelectedAttributes([conPeek(_attributeRecids,i)], _dimensionDefault)) < 1)
+            {
+                ret = false;
+            }
+        }
+    
+        return ret;
+    }
+
+}
