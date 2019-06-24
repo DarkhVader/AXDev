@@ -1,0 +1,2247 @@
+[Form]
+public class PMCContractDetails extends FormRun
+{
+    #File
+
+    PMCParameters                       parameters;
+    PMCContractLine                     activeContractLine;
+    PMGUserSetting                      userSetting;
+    // Variable to hold original record to be able to reselect after reread (possible updates from tenancyRight)
+    PMCContractLine                     contractLineToSelect;
+
+    [FormObservable]
+    date                                currWorkingDate;
+
+    [FormObservable]
+    boolean                             commonAreasRead;
+
+    // Number sequence
+    NumberSeqFormHandler                numberSeqContractFormHandler;
+    NumberSeqFormHandler                numberSeqPriceFormHandler;
+    NumberSeqFormHandler                numberSeqLineFormHandler;
+
+    // Dimension controller
+
+    // Address
+    LogisticsPostalAddressFormHandler   addressController;
+
+
+    //BSa.2015.03.13
+    PMCContractEstateType               fromEstateType;
+    PMCContractEstateId                 fromEstateId;
+    PMCEstateType                       fromBusRelEstateType;
+    PMEIdent                            fromBusRelEstateId;    
+
+    //  Open            
+    QueryBuildRange                     criteriaMainId;
+
+    // Valid time state handler
+    PMGValidTimeState validState;
+
+    void callBackRentalObjectId(PMERentalObjectId _rentalobjectId)
+    {
+        // Call-back from lookup of rentalobject (PMERentalobjectLookup2)
+        ;
+        pmcContractLine.RentalObjectId = _rentalobjectId;
+    
+        element.initContractLineFromRentalObject();
+        element.ConstructContractLineName();
+        pmcContractLine_ds.refresh();
+    
+    }
+
+    void changeWorkingDate(date _workingDate = dateNull())
+    {
+        Common record = pmcContract.data();
+        ;
+        userSetting.setWorkingDate(_workingDate);
+    
+        pmcContract_ds.executeQuery();
+    
+        if (record)
+        {
+            pmcContract_ds.positionToRecord(record);
+        }
+    }
+
+    boolean checkConstructContractId()
+    {
+        PMCParameters parms = PMCParameters::find();
+        TempStr       s;
+    
+        // Contract id cannot be modified manually
+        if (parms.ContractIdGeneration == PMCContractIdGenerationType::Constructed)
+        {
+            s = parms.AutoContractIdFieldValue1;
+            if (parms.AutoContractIdFieldType2 != PMGAutoKeyFieldType::Sequence)
+            {
+                s += ' + ' + parms.AutoContractIdFieldValue2;
+            }
+            else
+            {
+                s += ' + ' + enum2str(parms.AutoContractIdFieldType2);
+            }
+    
+            s = strFmt("@PMC1315", s);
+            return checkFailed(strFmt("@PMC1314") + num2char(10) + num2char(10) + s);
+        }
+    
+        // Ok
+        return true;
+    }
+
+    void ConstructContractLineName()
+    {
+        PMCRentalCostType rentalCostType = PMCRentalCostType::find(pmcContractLine.RentalCostTypeId);
+    
+        pmcContractLine.RentalUnit = rentalCostType.UnitID;
+        pmcContractLine.PriceListId = rentalCostType.PriceListId;
+        pmcContractLine.PriceListGroupId = rentalCostType.PriceListGroupId;
+    
+        if (rentalCostType.UnitID == parameters.AreaUnit || rentalCostType.UnitID == parameters.QuantityUnit)
+        {
+            pmcContractLine.DivergenceInvoiceUnit = NoYes::No;
+            rentalObject_RentalQty.enabled(false);
+            rentalObject_RentalUnit.enabled(false);
+        }
+        else
+        {
+            pmcContractLine.DivergenceInvoiceUnit = NoYes::Yes;
+            rentalObject_RentalQty.enabled(true);
+            rentalObject_RentalUnit.enabled(true);
+        }
+    
+        // original code has been moved to table-level for use elsewhere
+        if (!pmcContractLine.RecId)
+        {
+            pmcContractLine.Name = pmcContractLine.constructContractLineName(pmcContract, parameters);
+            pmcContractLine_ds.refresh();
+        }
+    }
+
+    public LogisticsPostalAddressFormHandler getAddressController()
+    {
+        return addressController;
+    }
+
+    public void init()
+    {        
+        PMEGround   fromGround;
+        PMCContract fromContract;
+        PMEBuilding fromBuilding;
+        boolean     isContractDataSet;           
+
+        if (element.args().dataset() == tableNum(PMEBuilding))
+        {
+            //AAT.BestPractice Take out "HandleInitPreSuper" Method
+            //SysListPageHelper::handleInitPreSuper(element);
+            isContractDataSet = true;
+        }
+        
+        switch (element.args().dataset())
+        {
+            case tableNum(PMEBuilding) :
+                fromBuilding = element.args().record();
+                fromEstateType = PMCEstateType::Building;
+                fromEstateId = fromBuilding.BuildingId;
+                break;
+            case tableNum(PMEGround) :
+                fromGround = element.args().record();
+                fromEstateType = PMCEstateType::Ground;
+                fromEstateId = fromGround.GroundId;
+                break;            
+            case tableNum(PMCContract):
+                fromContract = element.args().record();
+                fromEstateType = fromContract.EstateType;
+                fromEstateId = fromContract.EstateId;
+                break;
+            default :
+                fromEstateType = PMCEstateType::None;
+                fromEstateId = "";
+                break;
+        }
+    
+        if (element.args().parm())
+        {
+            contractLineToSelect = PMCContractLine::find(element.args().parm());
+        }
+
+        super();
+    
+        currWorkingDate = DateTimeUtil::getToday(DateTimeUtil::getUserPreferredTimeZone());
+    
+        userSetting = new PMGUserSetting();
+        userSetting.setAccessCriterias(pmcContract_ds.query(), 1, tableNum(PMCContract));
+    
+        this.setSetupVisability();
+        this.setContractIdStatus();                
+    
+        //Address
+        addressController = LogisticsPostalAddressFormHandler::newParameters(pmcContract_ds, logisticsPostalAddress_ds);
+        addressController.callerUpdateQuery(fieldNum(PMCContract, Location));
+
+        validState = new PMGValidTimeState(PMCContract_ds);
+        
+    }
+
+    void initContractLineFromRentalObject()
+    {
+        PMERentalObjectPrice rentObjPrice;
+        PMERentalObject      rentalObject;
+        PMERentalObjectArea  rentalObjectArea;
+        PMCPrice             price;
+        PMCPeriod            rentObjPeriod;
+        PMCPeriod            contractLinePeriod;
+        PMCContractLine      contractLine;        
+        int                  iObjectType;
+        PMEIdent             estateId;        
+        UnitOfMeasureSymbol  unitstr; 
+        PMCRentalArea        areaValue;
+        PMCRentalQuantity    qtyValue;
+        PMCPriceAmount       amount;
+    
+        if (!pmcContractLine.RentalObjectId)
+        {
+            return;
+        }
+    
+        rentalObject = PMERentalObject::find(pmcContractLine.RentalObjectId);
+    
+        // Set PMCContract.estateId and estateType (only for the 1.st line record)
+        select count(RecId) from contractLine where contractLine.ContractId == pmcContract.ContractId && contractLine.RentalObjectId != '';
+    
+        if (!pmcContract.EstateId && contractLine.RecId < 2)
+        {        
+            // Set estateId via PMERentalObjectArea
+            if (!estateId)
+            {
+                select firstonly rentalObjectId from rentalObjectArea where rentalObjectArea.RentalObjectId == pmcContractLine.RentalObjectId;
+                rentalObject = PMERentalObject::find(rentalObjectArea.rentalObjectId);               
+                estateId    = rentalObject.EstateId;
+                iObjectType = rentalObject.EstateType;
+            }
+    
+            pmcContract.EstateId   = estateId;
+            pmcContract.EstateType = iObjectType;
+        }
+        
+    
+        // If the line has connection to rentalobject and is of normal type some default values are collected from rentalobject
+        if (pmcContractLine.RentalObjectId && pmcContractLine.LineType == PMCContractLineType::Normal && !pmcContractLine.RecId)
+        {
+            // Has rental price records ?
+            rentObjPrice.clear();
+            rentObjPrice = PMERentalObjectPrice::find(pmcContractLine.RentalObjectId, '', currWorkingDate);
+    
+            if (!rentObjPrice)
+            {
+                // No?  Then get quantity, amount and unit values directly from PMERentalObjectArea.
+                // Calculate values.
+                [amount, areaValue, unitstr, qtyValue] = PMERentalObjectAreaCl::getAreaPrice(pmcContractLine.RentalObjectId, userSetting.validFrom(), userSetting.validTo() , currWorkingDate);
+    
+                pmcContractLine.Area = areaValue;
+                pmcContractLine.Quantity = qtyValue;
+                pmcContractLine.RentalUnit = unitstr;
+            }
+            else
+            {
+                if (rentObjPrice.Amount || rentObjPrice.RentalQty)
+                {
+                    if (rentalObject.AutoContractPrice)
+                    {
+                        rentObjPeriod = PMCPeriod::find(rentObjPrice.Period);
+    
+                        // If the price hasn't got a period, gets std report period from parameters
+                        if (!rentObjPeriod)
+                        {
+                            rentObjPeriod = PMCPeriod::find(PMCParameters::find().ReportPeriod);
+                        }
+    
+                        contractLinePeriod = PMCPeriod::find(pmcContractLine.PricePeriodId);
+    
+                        price.PriceRelationType = PMCPriceRelation::ContractLine;
+                        price.PriceType = PMCPriceType::Normal;
+                        price.RelationId = pmcContractLine.ContractLineId;
+                        price.ValidFrom = PMCContractLine.ValidFrom;
+                        price.ValidTo = PMCContractLine.ValidTo;
+    
+                        if (contractLinePeriod)
+                        {
+                            price.Amount = PMGTimeCalc::timeAmount(rentObjPrice.Amount, rentObjPeriod.TimeUnit, rentObjPeriod.TimeQty, contractLinePeriod.TimeUnit, contractLinePeriod.TimeQty);
+                        }
+                        else
+                        {
+                            price.Amount = rentObjPrice.Amount;
+                            pmcContractLine.PricePeriodId = rentObjPeriod.PeriodId;
+                        }
+                        price.insert();
+                    }
+                    if (!pmcContractLine.RentalCostTypeId)
+                    {
+                        pmcContractLine.RentalCostTypeId = rentObjPrice.RentalCostType;
+                    }
+    
+                    // Replace quantity field?
+                    if (!pmcContractLine.RentalQty)
+                    {
+                        // Calculate rental object areas
+                        pmcContractLine.Area = rentObjPrice.Area;
+                        pmcContractLine.Quantity = rentObjPrice.Quantity;
+                        pmcContractLine.DivergenceInvoiceUnit = rentObjPrice.DivergenceInvoiceUnit;
+                        pmcContractLine.RentalQty = rentObjPrice.RentalQty;
+                        pmcContractLine.RentalUnit = rentObjPrice.RentalUnit;
+                    }
+    
+                    // Replace areatype?
+                    if (!pmcContractLine.AreaType)
+                    {
+                        pmcContractLine.AreaType = rentObjPrice.AreaType;
+                    }
+                }
+            }
+        }
+    
+        if (pmcContractLine.RentalObjectId && pmcContractLine.LineType != PMCContractLineType::Normal && !pmcContractLine.RecId)
+        {
+            [amount, areaValue, unitstr, qtyValue] = PMERentalObjectAreaCl::getAreaPrice(pmcContractLine.RentalObjectId, userSetting.validFrom(), userSetting.validTo() , currWorkingDate);
+            if (!pmcContractLine.RentalQty)
+            {
+                pmcContractLine.Area = areaValue;
+                pmcContractLine.Quantity = qtyValue;
+                pmcContractLine.DivergenceInvoiceUnit = NoYes::No;
+            }
+        }
+    
+    }
+
+    void initDimensions()
+    {        
+        DimensionDefault dimension;
+        PMGOrgDimension orgDimension;
+        CompanyId       companyId;        
+        PMEGround ground;
+        PMEBuilding building;
+    
+        switch(pmcContract.EstateType)
+        {            
+            case PMCEstateType::Ground :
+                ground = PMEGround::find(pmcContract.EstateId);
+                dimension    = PMEObjectLegalEntity::find(ground.TableId, ground.RecId).DefaultDimension;
+                orgDimension = ground.OrgDimension;
+                companyId    = ground.CompanyId;
+                break;
+            case PMCEstateType::Building :
+                building = PMEBuilding::find(pmcContract.EstateId);
+                dimension    = PMEObjectLegalEntity::find(building.TableId, building.RecId).DefaultDimension;
+                orgDimension = building.OrgDimension;
+                companyId    = building.CompanyId;
+                break;
+            default :
+                dimension = pmcContract.DefaultDimension;
+                orgDimension = pmcContract.OrgDimension;
+                companyId = pmcContract.CompanyId;
+                break;
+        }
+    
+        pmcContract.DefaultDimension    = dimension;
+        pmcContract.OrgDimension = orgDimension;
+        pmcContract.CompanyId    = companyId;
+    
+    }
+
+    void initFromCostType()
+    {
+        if (!pmcContractLine.LimitCostType && pmcContractLine.RentalCostTypeId && pmcContractLine.LineType == PMCContractLineType::CostSettlement)
+        {
+            pmcContractLine.LimitCostType = PMCRentalCostType::find(pmcContractLine.RentalCostTypeId).CostSettlementLimitCostType;
+        }
+    }
+
+    void initPriceFromList()
+    {
+        PMCPeriod           linePer, stdPer;
+        PMCPeriodId         stdPeriod = PMCParameters::find().ReportPeriod;
+        PMCPrice            price;
+        PMCValidFrom        invoiceFromDate;
+        PMCPriceListCl      priceListCl;
+    
+        invoiceFromDate = pmcContractLine.InvoiceFrom ? pmcContractLine.InvoiceFrom : pmcContract.InvoiceFrom;
+    
+    
+        if (pmcContractLine.LineType == PMCContractLineType::Consumption)
+        {
+            if (!PMCConsumptionType::find(PMCRentalCostType::find(pmcContractLine.RentalCostTypeId).ConsumptionTypeId).OnAccount)
+            {
+                return;
+            }
+        }
+    
+    
+    
+        if (!pmcPrice.RecId && pmcContractLine.PriceListId && pmcContractLine.PriceListGroupId && pmcContractLine.RentalQty)
+        {
+            priceListCl = new PMCPriceListCl(pmcContractLine.PriceListId, pmcContractLine.PriceListGroupId, pmcContractLine.RentalQty, invoiceFromDate);
+            if (priceListCl.currPrice())
+            {
+                price.initValue();
+    
+                price.PriceRelationType = PMCPriceRelation::ContractLine;
+                price.PriceType = PMCPriceType::Normal;
+                price.RelationId = pmcContractLine.ContractLineId;
+                price.ValidFrom = PMCContractLine.ValidFrom;
+                price.ValidTo = PMCContractLine.ValidTo;
+                if (pmcContractLine.PricePeriodId == stdPeriod)
+                {
+                    price.AmountPrUnit = priceListCl.currPrice();
+                    price.Amount = priceListCl.currQtyPrice();
+                }
+                else
+                {
+                    linePer = PMCPeriod::find(pmcContractLine.PricePeriodId);
+                    stdPer = PMCPeriod::find(stdPeriod);
+                    price.AmountPrUnit = PMGTimeCalc::timeAmount(priceListCl.currPrice(), stdPer.TimeUnit, stdPer.TimeQty, linePer.TimeUnit, linePer.TimeQty);
+                    price.Amount = PMGTimeCalc::timeAmount(priceListCl.currQtyPrice(), stdPer.TimeUnit, stdPer.TimeQty, linePer.TimeUnit, linePer.TimeQty);
+                }
+    
+                if (priceListCl.indexBased())
+                {
+                    price.Percentage = 100;
+                    price.AdjustmentType = PMCAdjustmentType::PriceIndex;
+                    price.PriceIndexId = priceListCl.priceIndexId();
+                    if (priceListCl.baseDate())
+                    {
+                        price.FixedBase = NoYes::Yes;
+                        price.BaseIdxDate = priceListCl.baseDate();
+                        price.OrigAmountPrUnit = priceListCl.basePrice();
+                        price.OriginalAmount = priceListCl.baseQtyPrice();
+                        if (pmcContractLine.PricePeriodId != stdPeriod)
+                        {
+                            price.OrigAmountPrUnit = PMGTimeCalc::timeAmount(price.OrigAmountPrUnit, stdPer.TimeUnit, stdPer.TimeQty, linePer.TimeUnit, linePer.TimeQty);
+                            price.OriginalAmount = PMGTimeCalc::timeAmount(price.OriginalAmount, stdPer.TimeUnit, stdPer.TimeQty, linePer.TimeUnit, linePer.TimeQty);
+                        }
+                    }
+                    else
+                    {
+                        price.BaseIdxDate = priceListCl.currDate();
+                        price.OrigAmountPrUnit = price.AmountPrUnit;
+                        price.OriginalAmount = price.Amount;
+                    }
+                }
+                price.PriceDate = priceListCl.currDate();
+                price.Amount = CurrencyExchangeHelper::amount(price.Amount, pmcContract.CurrencyCode);
+                price.AmountPrUnit = CurrencyExchangeHelper::amount(price.AmountPrUnit, pmcContract.CurrencyCode);
+                price.OriginalAmount = CurrencyExchangeHelper::amount(price.OriginalAmount, pmcContract.CurrencyCode);
+                price.OrigAmountPrUnit = CurrencyExchangeHelper::amount(price.OrigAmountPrUnit, pmcContract.CurrencyCode);
+                price.insert();
+            }
+        }
+    }
+
+    PMERentalObjectId insertRentalObject()
+    {
+        PMERentalObject rentalObject;
+        PMERentalObjectArea rentalObjectArea;
+        PMCContractLine csContractLine;    //contractLine costSettlement        
+        NumberSequenceReference numSeqRefPMERentalObjectId = PMEParameters::numRefPMERentalObjectId();
+        NumberSeq numSeqContractLineId;
+        int objectType;        
+        PMERentalobjectAreaLookup areaLookup;
+        PMCRentalObjectTypeContractLine rentalObjectTypeContractLine;
+        PMCRentalObjectTypeArea rentalObjectTypeArea;
+    
+        ttsbegin;
+    
+        select rentalObjectTypeContractLine where rentalObjectTypeContractLine.AutoRentalObjectType == pmcContractLine.AutoRentalobjectType;
+
+        rentalObject.clear();
+        rentalObject.initValue();
+    
+        if (numSeqRefPMERentalObjectId)
+        {
+            rentalObject.RentalObjectId = NumberSeq::newGetNum(numSeqRefPMERentalObjectId).num();
+        }
+    
+        objectType = pmcContract.EstateType; //"Creeps" round syntax checking
+              
+        rentalObject.initRentalObjectFromEstate(PMCContract.EstateId, PMCContract.EstateType);
+        rentalObject.RentalObjectType = rentalObjectTypeContractLine.RentalObjectType;
+        rentalObject.AutoRentalObject = NoYes::Yes;
+    
+        if (rentalObject.ValidFrom < pmcContractLine.ReservFrom)
+        {
+            rentalObject.ValidFrom = pmcContractLine.ReservFrom;
+        }
+        if (rentalObject.ValidTo > pmcContractLine.ReservTo || !rentalObject.ValidTo)
+        {
+            rentalObject.ValidTo = pmcContractLine.ReservTo;
+        }
+    
+        rentalObject.insert();
+    
+        // Updates values in contractLine
+        pmcContractLine.RentalCostTypeId = rentalObjectTypeContractLine.RentalCostType;
+        pmcContractLine.AreaType = rentalObjectTypeContractLine.AreaType;
+        pmcContractLine.Name = pmcContractLine.constructContractLineName(pmcContract);
+    
+        rentalObject.Name = pmcContract.Name + "/" + rentalObject.Name;
+    
+        rentalObject.update();
+    
+        ttscommit;
+    
+        //Has to make user choose from list
+        areaLookup = new PMERentalobjectAreaLookup(rentalObject);
+        areaLookup.lookupArea();
+    
+        ttsbegin;
+        // Finds out how much area has been selected and updates contractLine, if the user hasn't filled out
+        if (pmcContractLine.Area == 0 && pmcContractLine.Quantity == 0)
+        {
+            while select rentalObjectArea
+            where rentalObjectArea.RentalObjectId == rentalObject.RentalObjectId
+                join AreaFromObjectType from rentalObjectTypeArea
+                where rentalObjectTypeArea.AutoRentalObjectType == pmcContractLine.AutoRentalobjectType
+                    && rentalObjectTypeArea.IncludeInAreaCalculation == NoYes::Yes
+                    && rentalObjectTypeArea.AreaType == rentalObjectArea.Areatype
+            {
+                if (int2str(rentalObjectArea.getObjectType()) == int2str(rentalObjectTypeArea.AreaFromObjectType))
+                {
+                    pmcContractLine.Quantity += rentalObjectArea.RentalQty;
+                }
+                pmcContractLine.Area += rentalObjectArea.AreaValue;
+            }
+            pmcContractLine.update();
+        }
+        // inserts ev. costSetttlmentLine
+        if (rentalObjectTypeContractLine.InsertCostSettlementLine == NoYes::Yes)
+        {
+            numSeqContractLineId = NumberSeq::newGetNum(PMCParameters::numRefPMCContractLineId(), true, true);
+            csContractLine.data(pmcContractLine);
+            csContractLine.ContractLineId = numSeqContractLineId.num();
+            csContractLine.LineType = PMCContractLineType::CostSettlement;
+            csContractLine.RentalObjectId = rentalObject.RentalObjectId;
+            csContractLine.RentalCostTypeId = rentalObjectTypeContractLine.RentalCostTypeCostSettlement;
+            csContractLine.Quantity = pmcContractLine.Quantity;
+            csContractLine.Area = pmcContractLine.Area;
+            csContractLine.Name = csContractLine.constructContractLineName(pmcContract);
+            csContractLine.insert();
+            numSeqContractLineId.used();
+        }
+        ttscommit;
+    
+        return rentalObject.RentalObjectId;
+    }
+
+    NumberSeqFormHandler numberSeqFormHandler()
+    {
+        if (!numberSeqContractFormHandler)
+        {
+            numberSeqContractFormHandler = NumberSeqFormHandler::newForm(
+                PMCParameters::numRefPMCContractId().NumberSequenceId,
+                element,
+                pmcContract_DS,
+                fieldNum(PMCContract, ContractId));
+        }
+    
+        return numberSeqContractFormHandler;
+    }
+
+    NumberSeqFormHandler numberSeqLineFormHandler()
+    {
+        if (!numberSeqLineFormHandler)
+        {
+            numberSeqLineFormHandler = NumberSeqFormHandler::newForm(
+                PMCParameters::numRefPMCContractLineId().NumberSequenceId,
+                element,
+                pmcContractLine_DS,
+                fieldNum(PMCContractLine, ContractLineId));
+        }
+    
+        return numberSeqLineFormHandler;
+    }
+
+    NumberSeqFormHandler numberSeqPriceFormHandler()
+    {
+        if (!numberSeqPriceFormHandler)
+        {
+            numberSeqPriceFormHandler = NumberSeqFormHandler::newForm(
+                PMCParameters::numRefPMCPricePriceId().NumberSequenceId,
+                element,
+                pmcPrice_DS,
+                fieldNum(PMCPrice, PriceId));
+        }
+    
+        return numberSeqPriceFormHandler;
+    }
+
+    void refreshContract()
+    {
+        PMCContract currContract;
+    
+        currContract = PMCContract::find(pmcContract.ContractId);
+        pmcContract_ds.research();
+        pmcContract_ds.positionToRecord(currContract);
+        pmcContract_ds.refreshEx(-1);
+    }
+
+    private void setContractIdStatus()
+    {
+        PMCParameters pmcParameters;
+    
+        pmcParameters = PMCParameters::find();
+    
+        if (pmcParameters.ContractIdGeneration == PMCContractIdGenerationType::Manual)
+        {
+            pmcContract_ds.object(fieldNum(PMCContract, ContractId)).allowEdit(true);
+        }
+        else
+        {
+            pmcContract_ds.object(fieldNum(PMCContract, ContractId)).allowEdit(false);
+        }
+    }
+
+    void setContractLineOnOff()
+    {
+    
+        contractLineInvoicing_InvoiceFrom.enabled(
+            pmcContractLine.InvoiceDivergenceDate == PMCContractDivergenceDate::Complete
+            || pmcContractLine.InvoiceDivergenceDate == PMCContractDivergenceDate::StartDate);
+        contractLineInvoicing_InvoiceTo.enabled(
+            pmcContractLine.InvoiceDivergenceDate == PMCContractDivergenceDate::Complete
+            || pmcContractLine.InvoiceDivergenceDate == PMCContractDivergenceDate::EndDate);
+    
+        contractLineReservation_ReservFrom.enabled(
+            pmcContractLine.ReservDivergenceDate == PMCContractDivergenceDate::Complete
+            || pmcContractLine.ReservDivergenceDate == PMCContractDivergenceDate::StartDate);
+    
+        contractLineReservation_ReservTo.enabled(
+            pmcContractLine.ReservDivergenceDate == PMCContractDivergenceDate::Complete
+            || pmcContractLine.ReservDivergenceDate == PMCContractDivergenceDate::EndDate);
+    
+    
+        if (pmcContractLine.DivergenceInvoiceUnit)
+        {
+            rentalObject_RentalQty.enabled(true);
+            rentalObject_RentalUnit.enabled(true);
+        }
+        else
+        {
+            rentalObject_RentalQty.enabled(false);
+            rentalObject_RentalUnit.enabled(false);
+        }
+    
+        if (pmcContractLine.SeparateInvoice)
+        {
+            lineMainDueMonthWeek.enabled(true);
+            lineMainDueDay.enabled(true);
+            lineMainDueNo.enabled(true);
+    
+            lineInvoiceMethod.enabled(true);
+            lineCollectionId.enabled(true);
+    
+            linePayment.enabled(true);
+            linePaymentId.enabled(true);
+            //lineAutPaymFrom.enabled(true);
+            //lineAutPaymTo.enabled(true);
+        }
+        else
+        {
+            lineMainDueMonthWeek.enabled(false);
+            lineMainDueDay.enabled(false);
+            lineMainDueNo.enabled(false);
+            lineInvoiceMethod.enabled(false);
+            lineCollectionId.enabled(false);
+            linePayment.enabled(false);
+            linePaymentId.enabled(false);
+            //lineAutPaymFrom.enabled(false);
+            //lineAutPaymTo.enabled(false);
+        }
+    
+    
+        switch(pmcContractLine.LineType)
+        {
+            case PMCContractLineType::Normal :
+                turnover_TurnoverTypeId.enabled(false);
+                costSettlement_CostSettlementId.enabled(false);
+                turnover_TurnoverFromLine.enabled(false);
+                costSettlement_LimitCostType.enabled(false);
+                costSettlement_SettlementFeeCostType.enabled(false);
+                costSettlement_SettlementFeePercentage.enabled(false);
+                seasonId.enabled(true);
+                turnoverMenuButton.enabled(false);
+                costSettlementShare.enabled(false);
+                //subLine.enabled(true);
+                costSettlement_CostSettlementSettlementRentalCostType.enabled(false);
+                pmcMeterLine.enabled(false);
+                costSettlement_FixedSettlement.enabled(false);
+                break;
+            case PMCContractLineType::CostSettlement :
+                turnover_TurnoverTypeId.enabled(false);
+                turnover_TurnoverFromLine.enabled(false);
+                costSettlement_CostSettlementId.enabled(true);
+                costSettlement_LimitCostType.enabled(true);
+                costSettlement_SettlementFeeCostType.enabled(true);
+                costSettlement_SettlementFeePercentage.enabled(true);
+                seasonId.enabled(false);
+                turnoverMenuButton.enabled(false);
+                costSettlementShare.enabled(true);
+                subLine.enabled(false);
+                costSettlement_CostSettlementSettlementRentalCostType.enabled(true);
+                pmcMeterLine.enabled(false);
+                costSettlement_FixedSettlement.enabled(true);
+                break;
+            case PMCContractLineType::Turnover :
+                turnover_TurnoverTypeId.enabled(true);
+                turnover_TurnoverFromLine.enabled(true);
+                costSettlement_CostSettlementId.enabled(false);
+                costSettlement_LimitCostType.enabled(false);
+                costSettlement_SettlementFeeCostType.enabled(false);
+                costSettlement_SettlementFeePercentage.enabled(false);
+                seasonId.enabled(false);
+                turnoverMenuButton.enabled(true);
+                costSettlementShare.enabled(false);
+                subLine.enabled(false);
+                costSettlement_CostSettlementSettlementRentalCostType.enabled(false);
+                pmcMeterLine.enabled(false);
+                costSettlement_FixedSettlement.enabled(false);
+                break;
+            case PMCContractLineType::Consumption :
+                turnover_TurnoverTypeId.enabled(false);
+                costSettlement_CostSettlementId.enabled(false);
+                turnover_TurnoverFromLine.enabled(false);
+                costSettlement_LimitCostType.enabled(false);
+                costSettlement_SettlementFeeCostType.enabled(false);
+                costSettlement_SettlementFeePercentage.enabled(false);
+                seasonId.enabled(true);
+                turnoverMenuButton.enabled(false);
+                costSettlementShare.enabled(false);
+                subLine.enabled(true);
+                costSettlement_CostSettlementSettlementRentalCostType.enabled(false);
+                pmcMeterLine.enabled(true);
+                costSettlement_FixedSettlement.enabled(false);
+                break;
+        }
+
+        Areas.enabled(PMCContractLine.RentalObjectId ? true : false);
+    }
+
+    void setContractOnOff()
+    {
+    
+        invoicing_InvoiceFrom.enabled(
+            pmcContract.InvoiceDivergenceDate == PMCContractDivergenceDate::Complete
+            || pmcContract.InvoiceDivergenceDate == PMCContractDivergenceDate::StartDate);
+        invoicing_InvoiceTo.enabled
+            (pmcContract.InvoiceDivergenceDate == PMCContractDivergenceDate::Complete
+            || pmcContract.InvoiceDivergenceDate == PMCContractDivergenceDate::EndDate);
+        reservation_ReservFrom.enabled(
+            pmcContract.ReservDivergenceDate == PMCContractDivergenceDate::Complete
+            || pmcContract.ReservDivergenceDate == PMCContractDivergenceDate::StartDate);
+        reservation_ReservTo.enabled(
+            pmcContract.ReservDivergenceDate == PMCContractDivergenceDate::Complete
+            || pmcContract.ReservDivergenceDate == PMCContractDivergenceDate::EndDate);
+    
+    }
+
+    void setCurrPriceEnabled()
+    {
+        PMCUseUnitPrice useUnitPrice;
+    
+        if (!pmcContractLine.RecId)
+        {
+            currPrice.enabled(false);
+        }
+        else
+        {
+            currPrice.enabled(true);
+        }
+    
+        if (currPrice.enabled())
+        {
+            useUnitPrice = pmcContractLine.useUnitPrice();
+            pmcPrice_Amount.enabled(!useUnitPrice);
+            pmcPrice_AmountPrUnit.enabled(useUnitPrice);
+            currPrice.enabled(!useUnitPrice);
+        }
+    
+    }
+
+    private void setSetupVisability()
+    {
+        // System parameters for contracting
+        parameters = PMCParameters::find();
+    
+        if (parameters.AutoRentalObject == NoYes::No)
+        {
+            autoRentalObject.visible(false);
+        }
+    
+        if (parameters.RentalType == NoYes::No)
+        {
+            rentalType.visible(false);
+        }
+    
+        if (parameters.RentalType == NoYes::No && parameters.AutoRentalObject == NoYes::No)
+        {
+            tabHeaderSetup.visible(false);
+        }
+    }
+
+    [DataSource]
+    class PMCContract
+    {
+        public int active()
+        {
+            int ret;
+        
+            ret = super();
+        
+            if (ret)
+            {
+                element.setContractOnOff();
+            }
+        
+        
+        
+            //Address
+            if (ret)
+            {
+                addressController.callerActive();
+                addressController.callerUpdateButtons(newAddress, editAddress, clearAddress, mapButton);
+            }
+        
+            return ret;
+        }
+
+        public void initValue()
+        {            
+            Common callerRecord;         
+        
+            // Super must occur after default-value system
+            super();
+            pmcContract.MainId = '';
+        
+            if (fromEstateType && fromEstateId)
+            {
+                pmcContract.EstateType = fromEstateType;
+                pmcContract.EstateId = fromEstateId;
+            }            
+        
+            callerRecord = element.args().record();
+            if (callerRecord.TableId == tableNum(CustTable))
+            {
+                pmcContract.AccountType = PMCAccountType::Cust;
+                if (parameters.CustPaymTermId == NoYes::Yes)
+                {
+                    pmcContract.Payment = CustTable::find(pmcContract.AccountNum).PaymTermId;
+                }                
+            }
+            else if (callerRecord.TableId == tableNum(VendTable))
+            {
+                pmcContract.AccountType = PMCAccountType::Vend;                
+            }
+        
+            // To get dimensions when called from building/ground
+            if (pmcContract.EstateId != "")
+            {
+                element.initDimensions();
+            }
+        
+            if (parameters.DefaultAutoRentalobjectType != "")
+            {
+                pmcContract.AutoRentalObjectType = parameters.DefaultAutoRentalobjectType;                    
+            }
+        }
+
+        public void delete()
+        {
+            if (parameters.ContractIdGeneration == PMCContractIdGenerationType::Automatic)
+            {
+                element.numberSeqFormHandler().formMethodDataSourceDelete();
+            }
+        
+            super();
+        
+        }
+
+        public void write()
+        {
+        
+            super();
+        
+            if (parameters.ContractStatusUpdateAuto == NoYes::Yes)
+            {
+                pmcContract.ContractStatus = pmcContract.setContractStatus();
+                pmcContract.update();
+        
+                element.refreshContract();
+            }
+        
+        
+            if (parameters.ContractIdGeneration == PMCContractIdGenerationType::Automatic)
+            {
+                element.numberSeqFormHandler().formMethodDataSourceWrite();
+            }
+        }
+
+        public boolean validateWrite()
+        {
+            boolean ret;
+        
+            // If contract id not automatic then create contract id according to users configuration
+            if (!pmcContract.ContractId)
+            {
+                pmcContract.ContractId = pmcContract.createContractId();
+            }
+        
+            // Create contract name
+            if (!pmcContract.Name)
+            {
+                pmcContract.Name = pmcContract.createContractName();
+            }
+        
+            ret = super();
+        
+            // Check if can access organization codes
+            if (ret && !userSetting.checkAccessOrgDimensions(pmcContract.OrgDimension, true))
+            {
+                ret = false;
+            }
+        
+            if (parameters.ContractIdGeneration == PMCContractIdGenerationType::Automatic)
+            {
+                ret = element.numberSeqFormHandler().formMethodDataSourceValidateWrite(ret);
+            }
+        
+            return ret;
+        }
+
+        public void init()
+        {
+            super();
+                
+            if (fromEstateType && fromEstateId)
+            {
+                if (!this.query().dataSourceTable(tableNum(PMCContract)).findRange(fieldNum(PMCContract, EstateType)))
+                {
+                    this.query().dataSourceTable(tableNum(PMCContract)).addRange(fieldNum(PMCContract, EstateType));
+                }
+                if (!this.query().dataSourceTable(tableNum(PMCContract)).findRange(fieldNum(PMCContract, EstateId)))
+                {
+                    this.query().dataSourceTable(tableNum(PMCContract)).addRange(fieldNum(PMCContract, EstateId));
+                }
+            }
+            this.query().dataSourceTable(tableNum(PMCContract)).sortClear();
+            this.query().dataSourceTable(tableNum(PMCContract)).addSortField(fieldNum(PMCContract, ContractId), SortOrder::Ascending);
+        }
+
+        public void executeQuery()
+        {            
+            QueryBuildRange critEstateType;
+            QueryBuildRange critEstateId;                    
+        
+            if (fromEstateType && fromEstateId)
+            {
+                critEstateType = this.query().dataSourceTable(tableNum(PMCContract)).findRange(fieldNum(PMCContract, EstateType));
+                critEstateType.value(enum2str(fromEstateType));
+                critEstateId = this.query().dataSourceTable(tableNum(PMCContract)).findRange(fieldNum(PMCContract, EstateId));
+                critEstateId.value(fromEstateId);
+            }
+
+            super();
+        }
+
+        public void displayOption(Common _p1, FormRowDisplayOption _options)
+        {
+            PMCContract contract;
+          
+            contract = _p1;
+        
+            if (contract.RecId)
+            {
+                _options.backColor(userSetting.backColor(contract.ValidFrom, contract.ValidTo));
+            }
+           super(_p1, _options);
+           
+        }
+
+        /// <summary>
+        ///
+        /// </summary>
+        /// <param name = "_append"></param>
+        public void create(boolean _append = false)
+        {
+            if (parameters.ContractIdGeneration == PMCContractIdGenerationType::Automatic)
+            {
+                element.numberSeqFormHandler().formMethodDataSourceCreatePre();
+            }
+            super(_append);
+            if (parameters.ContractIdGeneration == PMCContractIdGenerationType::Automatic)
+            {
+                element.numberSeqFormHandler().formMethodDataSourceCreate();
+            }
+        }
+
+        /// <summary>
+        ///
+        /// </summary>
+        public void linkActive()
+        {
+            if (parameters.ContractIdGeneration == PMCContractIdGenerationType::Automatic)
+            {
+                element.numberSeqFormHandler().formMethodDataSourceLinkActive();
+            }
+            super();
+        }
+
+        [DataField]
+        class AccountNum 
+        {
+            public void modified()
+            {
+            
+                super();                            
+            
+                if (PMCParameters::find().CustPaymTermId == NoYes::Yes
+                    && pmcContract.AccountType == PMCAccountType::Cust
+                    && pmcContract.AccountNum)
+                {
+                    pmcContract.Payment = CustTable::find(pmcContract.AccountNum).PaymTermId;
+                }
+            
+            }
+
+        }
+
+        [DataField]
+        class ContractId 
+        {
+            public void modified()
+            {
+                super();
+            
+                if (!element.checkConstructContractId())
+                {
+                    pmcContract.ContractId = '';
+                }
+            }
+
+        }
+
+        [DataField]
+        class EstateId 
+        {
+            public void modified()
+            {
+                element.initDimensions();
+            }
+
+            public void jumpRef()
+            {
+                if (PMCContract.EstateType == PMCEstateType::Building)
+                {
+                    PMEBuilding::jumpRefComp(this, curExt(), PMCContract.EstateId);
+                }
+                else if (PMCContract.EstateType == PMCEstateType::Ground)
+                {
+                    PMEGround::jumpRefComp(this, curExt(), PMCContract.EstateId);
+                }
+            }
+
+        }
+
+        [DataField]
+        class EstateType 
+        {
+            public void modified()
+            {
+                super();
+                /*
+                if (pmcContract.orig().EstateType != pmcContract.EstateType) 
+                {
+                    pmcContract.EstateId = '';
+                }
+                */
+                pmcContract.EstateId = '';
+            }
+
+        }
+
+        [DataField]
+        class InvoiceDivergenceDate 
+        {
+            public void modified()
+            {
+                super();
+                element.setContractOnOff();
+            }
+
+        }
+
+        [DataField]
+        class MainDueDay 
+        {
+            /// <summary>
+            ///
+            /// </summary>
+            /// <returns></returns>
+            public boolean validate()
+            {
+                boolean ret;
+                
+                if(PMCContract.MainDueDay < 1)
+                {
+                    PMCContract.MainDueDay = 1;
+                }
+
+                if(PMCContract.MainDueMonthWeek == PMCMonthWeek::Month)
+                {
+                    if(PMCContract.MainDueDay > 31)
+                    {
+                        PMCContract.MainDueDay = 31;
+                    }
+                }
+
+                else if(PMCContract.MainDueMonthWeek == PMCMonthWeek::Week)
+                {
+                    if(PMCContract.MainDueDay > 7)
+                    {
+                        PMCContract.MainDueDay = 7;
+                    }
+                }
+        
+                ret = super();
+        
+                return ret;
+            }
+
+        }
+
+        [DataField]
+        class MainDueMonthWeek 
+        {
+            /// <summary>
+            ///
+            /// </summary>
+            public void modified()
+            {
+                super();
+                PMCContract.MainDueDay = 1;
+                PMCContract.MainDueNo  = 1;
+            }
+
+        }
+
+        [DataField]
+        class MainDueNo 
+        {
+            /// <summary>
+            ///
+            /// </summary>
+            /// <returns></returns>
+            public boolean validate()
+            {
+                boolean ret;
+                
+                if(PMCContract.MainDueNo < 1)
+                {
+                    PMCContract.MainDueNo = 1;
+                }
+
+                if(PMCContract.MainDueMonthWeek == PMCMonthWeek::Month)
+                {
+                    if(PMCContract.MainDueNo > 12)
+                    {
+                        PMCContract.MainDueNo = 12;
+                    }
+                }
+
+                else if(PMCContract.MainDueMonthWeek == PMCMonthWeek::Week)
+                {
+                    if(PMCContract.MainDueNo > 53)
+                    {
+                        PMCContract.MainDueNo = 53;
+                    }
+                }
+        
+                ret = super();
+        
+                return ret;
+            }
+
+        }
+
+        [DataField]
+        class RentalTypeId 
+        {
+            public void modified()
+            {
+                super();
+                PMCRentalTypeCl::fillContractFromRentalType(pmcContract);
+            
+            }
+
+        }
+
+        [DataField]
+        class ReservDivergenceDate 
+        {
+            public void modified()
+            {
+                super();
+                element.setContractOnOff();
+            }
+
+        }
+
+    }
+
+    [DataSource]
+    class PMCContractLine
+    {
+        public int active()
+        {
+            int ret;
+        
+            ret = super();
+        
+            element.setContractLineOnOff();
+        
+            return ret;
+        }
+
+        //BP Deviation Documented
+        display PMCNormalPriceAmount normalPriceCurrWorkingDate(PMCContractLine _contractLine)
+        {
+            return _contractLine.calcNormalPrice(currWorkingDate);
+        }
+
+        public void delete()
+        {
+            element.numberSeqLineFormHandler().formMethodDataSourceDelete();
+        
+            super();
+        
+        }
+
+        public boolean validateWrite()
+        {
+            boolean ret;
+        
+            ret = super();
+        
+            ret = element.numberSeqLineFormHandler().formMethodDataSourceValidateWrite(ret);
+        
+            return ret;
+        }
+
+        //BP Deviation Documented
+        display Integer getIconIndex(PMCContractLine t)
+        {
+            // Return icon index
+            if (t.hasChildren() == NoYes::Yes)
+            {
+                return 1;
+            }
+            else
+            {
+                return 0;
+            }
+        }
+
+        public void create(boolean _append = false)
+        {
+            element.numberSeqLineFormHandler().formMethodDataSourceCreatePre();
+        
+            super(_append);
+        
+            element.numberSeqLineFormHandler().formMethodDataSourceCreate();
+        }
+
+        public void write()
+        {
+            PMCValidFrom validFrom;
+            PMCValidTo   validTo;
+            PMCContract contract;
+            boolean newContractLine;
+            boolean doRefresh;
+            ;
+        
+            validFrom = pmcContractLine.orig().ValidFrom;
+            validTo = pmcContractLine.orig().ValidTo;
+        
+            contract = pmcContract.data();
+            activeContractLine = pmcContractline.data();
+        
+            if (!pmcContractLine.RecId)
+            {
+                newContractLine = true;
+            }
+        
+            //1CF GBLOZNEL 2013.02.20 VAR
+        
+            super();
+        
+            element.numberSeqLineFormHandler().formMethodDataSourceWrite();
+        
+            // Auto rentalObject
+            if (newContractLine && pmcContractLine.AutoRentalObject == NoYes::Yes && !pmcContractLine.RentalObjectId)
+            {
+                pmcContractLine.RentalObjectId = element.insertRentalObject();
+                pmcContractLine.update();
+            }
+        
+            if (newContractLine && pmcContractLine.RentalObjectId)
+            {
+                doRefresh = PMCSubRentalObjectCl::insChildObjects(pmcContractLine, contract, parameters);
+            }
+            else
+            {
+                doRefresh = false;
+            }
+        
+            if (pmcContractLine.ValidFrom != validFrom || pmcContractLine.ValidTo != validTo)
+            {
+                pmcContract_ds.reread();
+                pmcContract_ds.refreshEx(-1);
+            }
+        
+            if (pmcContractLine.AutoRentalObject == NoYes::Yes)
+            {
+                pmcContractLine_ds.research();
+                pmcContractLine_ds.positionToRecord(activeContractLine);
+            }
+        
+        
+            if (doRefresh)
+            {
+                pmcContractLine_ds.research();
+                pmcContractLine_ds.positionToRecord(activeContractLine);
+            }
+        }
+
+        edit PMCPriceAmount currPrice(boolean _set, PMCContractLine _contractLine, PMCNormalPriceAmount _price)
+        {
+            if (_set)
+            {
+                _contractLine.updatePrice(currWorkingDate, _price);
+                return _price;
+        
+            }
+            else
+            {
+                return _contractLine.calcNormalPrice(currWorkingDate, _contractLine.PricePeriodId);
+            }
+        
+        }
+
+        public void displayOption(Common _p1, FormRowDisplayOption _options)
+        {
+            PMCContractLine contractLine;
+            contractLine = _p1;
+        
+            if (contractLine.RecId)
+            {
+                _options.backColor(userSetting.backColor(contractLine.ValidFrom, contractLine.ValidTo));
+            }
+            super(_p1, _options);
+        }
+
+        public void executeQuery()
+        {
+            criteriaMainId.value(queryValue(''));
+        
+            super();
+        
+            if (contractLineToSelect)
+            {
+                pmcContractLine_ds.positionToRecord(contractLineToSelect);
+            }
+        
+            contractLineToSelect = null;
+        }
+
+        public void init()
+        {
+            #define.IconNormal(809)
+            #define.IconhasSubLines(1096)
+            Imagelist list;
+            ;
+        
+            super();
+        
+            // Line icons
+            list  = new Imagelist(Imagelist::smallIconWidth(), Imagelist::smallIconHeight());
+            list.add(new Image(#IconNormal));
+            list.add(new Image(#IconhasSubLines));
+            lineIcon.imageList(list);
+        
+            criteriaMainId = this.query().dataSourceNo(1).addRange(fieldNum(PMCContractLine, MainId));
+        }
+
+        public void initValue()
+        {
+            ;
+        
+            super();
+        
+            // Inititiates values from contract
+            pmcContractLine.initFromContract(pmcContract);
+        
+            // Came from PMErentalObject, contract list
+            switch (element.args().dataset())
+            {
+                case tableNum(PMCContractLine):
+                    pmcContractLine.RentalObjectId = element.args().record().(fieldNum(PMCContractLine, RentalObjectId));
+                    if (pmcContractLine.RentalObjectId)
+                    {
+                        element.initContractLineFromRentalObject();
+                    }
+                    break;
+            }
+        
+            // Not available for new lines because of dependency of other fields
+            element.setCurrPriceEnabled();
+        }
+
+        public void refresh()
+        {
+            PMCContractLine contractLine;
+        
+            contractLine = pmcContractLine.orig();
+        
+            super();
+        
+            if (contractLine.ValidFrom != pmcContractLine.ValidFrom || contractLine.ValidTo != pmcContractLine.ValidTo)
+            {
+                pmcContract_ds.refresh();
+            }
+        
+        }
+
+        [DataField]
+        class AutoRentalObject 
+        {
+            public void modified()
+            {
+                super();
+                element.setCurrPriceenabled();
+            
+            }
+
+        }
+
+        [DataField]
+        class AutoRentalobjectType 
+        {
+            public void modified()
+            {
+                super();
+            
+                pmcContractLine.AutoRentalObject = PMCRentalObjectTypeContractLine::find(pmcContractLine.AutoRentalobjectType).AutoRentalObject;
+            
+                element.setCurrPriceenabled();
+            }
+
+        }
+
+        [DataField]
+        class DivergenceInvoiceUnit 
+        {
+            public void modified()
+            {
+                super();
+                element.setContractLineOnOff();
+            }
+
+        }
+
+        [DataField]
+        class InvoiceDivergenceDate 
+        {
+            public void modified()
+            {
+                super();
+                element.setContractLineOnOff();
+            }
+
+        }
+
+        [DataField]
+        class LineType 
+        {
+            public void modified()
+            {
+                super();
+                element.setContractLineOnOff();
+            }
+
+        }
+
+        [DataField]
+        class PriceListGroupId 
+        {
+            public void jumpRef()
+            {
+                PMCPriceListGroup::jumpRef(pmcContractLine.PriceListId, pmcContractLine.PriceListGroupId, this);
+            }
+
+            public void modified()
+            {
+                super();
+            
+                element.InitPriceFromList();
+            }
+
+        }
+
+        [DataField]
+        class RentalCostTypeId 
+        {
+            public void lookup(FormControl _formControl, str _filterStr)
+            {
+                FormRun fr;
+                Args args;
+            
+                if (!pmcContractLine.AreaType)
+                {
+                    super(_formControl, _filterStr);
+                }
+                else
+                {
+                    args = new Args(formStr(PMCRentalCostTypeLookup));
+                    args.parm(pmcContractLine.AreaType);
+                    fr = ClassFactory::formRunClassOnClient(args);
+                    this.performFormLookup(fr, _formControl);
+                }
+
+            
+            }
+
+            public void modified()
+            {
+                super();
+                element.ConstructContractLineName();
+            
+                element.initFromCostType();
+                element.setCurrPriceEnabled();
+            }
+
+        }
+
+        [DataField]
+        class RentalObjectId 
+        {
+            public void jumpRef()
+            {
+                Args args = new Args(formStr(PMERentalObjectDetails));
+                formRun fr;
+                PMERentalObject rentalObject;
+            
+                args.caller(element);
+                if (pmcContractLine.RentalObjectId)
+                {
+                    rentalObject = PMERentalObject::find(pmcContractLine.RentalObjectId);
+                    args.parmEnum(rentalObject.RentalObjectType);
+                    args.parmEnumType(enumNum(PMERentalObjectType));
+                    args.record(rentalObject);
+                }
+            
+                fr     = ClassFactory::formRunClassOnClient(args);
+                fr.init();
+            
+                fr.run();
+                fr.wait();            
+            }
+
+            public void modified()
+            {
+                super();
+            
+                element.initContractLineFromRentalObject();
+                element.ConstructContractLineName();
+            }
+
+        }
+
+        [DataField]
+        class RentalTypeLineId 
+        {
+            public void modified()
+            {
+                super();
+            
+                PMCRentalTypeCl::fillContractLineFromRentalType(pmcContractLine, pmcContract.RentalTypeId);
+            }
+
+        }
+
+        [DataField]
+        class ReservDivergenceDate 
+        {
+            public void modified()
+            {
+                super();
+            
+                element.setContractLineOnOff();
+            }
+
+        }
+
+        [DataField]
+        class SeparateInvoice 
+        {
+            public void modified()
+            {
+                super();
+            
+                element.setContractLineOnOff();
+            }
+
+        }
+
+    }
+
+    [DataSource]
+    class PMCPrice
+    {
+        public void create(boolean _append = false)
+        {
+            element.numberSeqPriceFormHandler().formMethodDataSourceCreatePre();
+        
+            super(_append);
+        
+            element.numberSeqPriceFormHandler().formMethodDataSourceCreate();
+        }
+
+        public void delete()
+        {
+            element.numberSeqPriceFormHandler().formMethodDataSourceDelete();
+        
+            super();
+        }
+
+        public void write()
+        {
+            super();
+        
+            element.numberSeqPriceFormHandler().formMethodDataSourceWrite();
+        }
+
+        public boolean validateWrite()
+        {
+            boolean ret;
+        
+            ret = super();
+        
+            ret = element.numberSeqPriceFormHandler().formMethodDataSourceValidateWrite(ret);
+        
+            return ret;
+        }
+
+        void setAdjustmentFields(boolean _forceTemplateUpdate = false)
+        {
+            FormDataObject          priceAmount;
+            ;
+            
+            ttsbegin;
+
+            priceAmount = pmcPrice_ds.object(fieldNum(PMCPrice, Amount));
+        
+        
+            switch (pmcPrice.AdjustmentType)
+            {
+                case PMCAdjustmentType::PriceIndex:
+                    adjustmentGeneral.enabled(true);
+                    adjustmentGeneral_AdjustmentType.enabled(true);
+                    adjustmentGeneral_AdjustmentPeriodId.enabled(true);
+                    adjustmentGeneral_AdjustmentDate.enabled(true);
+                    adjustmentGeneral_AdjustmentIterations.enabled(true);
+                    adjustmentGeneral_AdjustmentDecrease.enabled(true);
+                    adjustmentGeneral_AdjustmentNumber.enabled(true);
+                    adjustmentGeneral_AdjustmentMinPct.enabled(true);
+                    adjustmentGeneral_AdjustmentMaxPct.enabled(true);
+                    adjustmentGeneral_OriginalAmount.enabled(true);
+                    adjustmentIndex_PriceDate.enabled(true);
+        
+                    adjustmentPercent.enabled(false);
+                    PMCPrice.adjustmentPct = 0;
+                    adjustmentAmountGr.enabled(false);
+                    PMCPrice.adjustmentAmount = 0;
+                    adjustmentPriceList.enabled(false);
+                    //PMCPrice.PriceDate = dateNull();
+                    adjustmentIndex.enabled(true);
+                    break;
+        
+                case PMCAdjustmentType::Percent:
+                    adjustmentGeneral.enabled(true);
+                    adjustmentGeneral_AdjustmentType.enabled(true);
+                    adjustmentGeneral_AdjustmentPeriodId.enabled(true);
+                    adjustmentGeneral_AdjustmentDate.enabled(true);
+                    adjustmentGeneral_AdjustmentIterations.enabled(true);
+                    adjustmentGeneral_AdjustmentDecrease.enabled(true);
+                    adjustmentGeneral_AdjustmentNumber.enabled(true);
+                    adjustmentGeneral_AdjustmentMinPct.enabled(false);
+                    PMCPrice.AdjustmentMinPct = 0;
+                    adjustmentGeneral_AdjustmentMaxPct.enabled(false);
+                    PMCPrice.AdjustmentMaxPct = 0;
+                    adjustmentGeneral_OriginalAmount.enabled(true);
+        
+                    adjustmentPercent.enabled(true);
+                    adjustmentAmountGr.enabled(false);
+                    PMCPrice.adjustmentAmount = 0;
+                    adjustmentPriceList.enabled(false);
+                    PMCPrice.PriceDate = dateNull();
+                    
+                    PMCPrice.PriceIndexId = '';
+                    PMCPrice.IndexDate = dateNull();
+                    PMCPrice.FixedBase = NoYes::No;
+                    PMCPrice.BaseIdxDate = dateNull();
+                    PMCPrice.Percentage = 100;
+                    PMCPrice.PriceDate = dateNull();
+                    PMCPrice.PointsEstimated = 0;
+                    adjustmentIndex.enabled(false);
+                    break;
+        
+                case PMCAdjustmentType::Amount:
+                    adjustmentGeneral.enabled(true);
+                    adjustmentGeneral_AdjustmentType.enabled(true);
+                    adjustmentGeneral_AdjustmentPeriodId.enabled(true);
+                    adjustmentGeneral_AdjustmentDate.enabled(true);
+                    adjustmentGeneral_AdjustmentIterations.enabled(true);
+                    adjustmentGeneral_AdjustmentDecrease.enabled(true);
+                    adjustmentGeneral_AdjustmentNumber.enabled(true);
+                    adjustmentGeneral_AdjustmentMinPct.enabled(true);
+                    adjustmentGeneral_AdjustmentMaxPct.enabled(true);
+                    adjustmentGeneral_OriginalAmount.enabled(true);
+        
+                    adjustmentPercent.enabled(false);
+                    PMCPrice.adjustmentPct = 0;
+                    adjustmentAmountGr.enabled(true);
+                    adjustmentPriceList.enabled(false);
+                    PMCPrice.PriceDate = dateNull();
+
+                    PMCPrice.PriceIndexId = '';
+                    PMCPrice.IndexDate = dateNull();
+                    PMCPrice.FixedBase = NoYes::No;
+                    PMCPrice.BaseIdxDate = dateNull();
+                    PMCPrice.Percentage = 100;
+                    PMCPrice.PriceDate = dateNull();
+                    PMCPrice.PointsEstimated = 0;
+                    adjustmentIndex.enabled(false);
+                    break;
+        
+                case PMCAdjustmentType::None:
+                    adjustmentGeneral.enabled(true);
+                    adjustmentGeneral_AdjustmentType.enabled(true);
+                    adjustmentGeneral_AdjustmentPeriodId.enabled(false);
+                    PMCPrice.AdjustmentPeriodId = '';
+                    adjustmentGeneral_AdjustmentDate.enabled(false);
+                    PMCPrice.AdjustmentDate = dateNull();
+                    adjustmentGeneral_AdjustmentIterations.enabled(false);
+                    PMCPrice.AdjustmentIterations = 0;
+                    adjustmentGeneral_AdjustmentDecrease.enabled(false);
+                    PMCPrice.AdjustmentDecrease = PMCAdjustmentAutoLimit::None;
+                    adjustmentGeneral_AdjustmentNumber.enabled(false);
+                    PMCPrice.AdjustmentNumber = 0;
+                    adjustmentGeneral_AdjustmentMinPct.enabled(false);
+                    PMCPrice.AdjustmentMinPct = 0;
+                    adjustmentGeneral_AdjustmentMaxPct.enabled(false);
+                    PMCPrice.AdjustmentMaxPct = 0;
+                    adjustmentGeneral_OriginalAmount.enabled(false);
+                    PMCPrice.OriginalAmount = 0;
+                
+                    adjustmentPercent.enabled(false);
+                    PMCPrice.adjustmentPct = 0;
+                    adjustmentAmountGr.enabled(false);
+                    PMCPrice.adjustmentAmount = 0;
+                    adjustmentPriceList.enabled(false);
+                    PMCPrice.PriceDate = dateNull();
+
+                    PMCPrice.PriceIndexId = '';
+                    PMCPrice.IndexDate = dateNull();
+                    PMCPrice.FixedBase = NoYes::No;
+                    PMCPrice.BaseIdxDate = dateNull();
+                    PMCPrice.Percentage = 100;
+                    PMCPrice.PriceDate = dateNull();
+                    PMCPrice.PointsEstimated = 0;
+                    adjustmentIndex.enabled(false);
+                    break;
+        
+                case PMCAdjustmentType::AdHoc:
+                    adjustmentGeneral.enabled(true);
+                    adjustmentGeneral_AdjustmentType.enabled(true);
+                    adjustmentGeneral_AdjustmentPeriodId.enabled(true);
+                    adjustmentGeneral_AdjustmentDate.enabled(true);
+                    adjustmentGeneral_AdjustmentIterations.enabled(true);
+                    adjustmentGeneral_AdjustmentDecrease.enabled(true);
+                    adjustmentGeneral_AdjustmentNumber.enabled(true);
+                    adjustmentGeneral_AdjustmentMinPct.enabled(true);
+                    adjustmentGeneral_AdjustmentMaxPct.enabled(true);
+                    adjustmentGeneral_OriginalAmount.enabled(true);
+        
+                    adjustmentPercent.enabled(false);
+                    PMCPrice.adjustmentPct = 0;
+                    adjustmentAmountGr.enabled(false);
+                    PMCPrice.adjustmentAmount = 0;
+                    adjustmentPriceList.enabled(false);
+                    PMCPrice.PriceDate = dateNull();
+
+                    PMCPrice.PriceIndexId = '';
+                    PMCPrice.IndexDate = dateNull();
+                    PMCPrice.FixedBase = NoYes::No;
+                    PMCPrice.BaseIdxDate = dateNull();
+                    PMCPrice.Percentage = 100;
+                    PMCPrice.PriceDate = dateNull();
+                    PMCPrice.PointsEstimated = 0;
+                    adjustmentIndex.enabled(false);
+                    break;
+        
+                case PMCAdjustmentType::Manual:
+                    adjustmentGeneral.enabled(true);
+                    adjustmentGeneral_AdjustmentType.enabled(true);
+                    adjustmentGeneral_AdjustmentPeriodId.enabled(true);
+                    adjustmentGeneral_AdjustmentDate.enabled(true);
+                    adjustmentGeneral_AdjustmentIterations.enabled(true);
+                    adjustmentGeneral_AdjustmentDecrease.enabled(true);
+                    adjustmentGeneral_AdjustmentNumber.enabled(true);
+                    adjustmentGeneral_AdjustmentMinPct.enabled(false);
+                    PMCPrice.AdjustmentMinPct = 0;
+                    adjustmentGeneral_AdjustmentMaxPct.enabled(false);
+                    PMCPrice.AdjustmentMaxPct = 0;
+                    adjustmentGeneral_OriginalAmount.enabled(true);
+        
+                    adjustmentPercent.enabled(false);
+                    PMCPrice.adjustmentPct = 0;
+                    adjustmentAmountGr.enabled(false);
+                    PMCPrice.adjustmentAmount = 0;
+                    adjustmentPriceList.enabled(false);
+                    PMCPrice.PriceDate = dateNull();
+
+                    PMCPrice.PriceIndexId = '';
+                    PMCPrice.IndexDate = dateNull();
+                    PMCPrice.FixedBase = NoYes::No;
+                    PMCPrice.BaseIdxDate = dateNull();
+                    PMCPrice.Percentage = 100;
+                    PMCPrice.PriceDate = dateNull();
+                    PMCPrice.PointsEstimated = 0;
+                    adjustmentIndex.enabled(false);
+                    break;
+        
+                case PMCAdjustmentType::PriceList:
+                    adjustmentGeneral.enabled(true);
+                    adjustmentGeneral_AdjustmentType.enabled(true);
+                    adjustmentGeneral_AdjustmentPeriodId.enabled(true);
+                    adjustmentGeneral_AdjustmentDate.enabled(true);
+                    adjustmentGeneral_AdjustmentIterations.enabled(true);
+                    adjustmentGeneral_AdjustmentDecrease.enabled(true);
+                    adjustmentGeneral_AdjustmentNumber.enabled(true);
+                    adjustmentGeneral_AdjustmentMinPct.enabled(true);
+                    adjustmentGeneral_AdjustmentMaxPct.enabled(true);
+                    adjustmentGeneral_OriginalAmount.enabled(true);
+                    adjustmentPriceList_PriceDate.enabled(true);
+        
+                    adjustmentPercent.enabled(false);
+                    PMCPrice.adjustmentPct = 0;
+                    adjustmentAmountGr.enabled(false);
+                    PMCPrice.adjustmentAmount = 0;
+                    adjustmentPriceList.enabled(true);
+
+                    PMCPrice.PriceIndexId = '';
+                    PMCPrice.IndexDate = dateNull();
+                    PMCPrice.FixedBase = NoYes::No;
+                    PMCPrice.BaseIdxDate = dateNull();
+                    PMCPrice.Percentage = 100;
+                    //PMCPrice.PriceDate = dateNull();
+                    PMCPrice.PointsEstimated = 0;
+                    adjustmentIndex.enabled(false);
+                    break;
+        
+                case PMCAdjustmentType::Budget:
+                    adjustmentGeneral.enabled(true);
+                    adjustmentGeneral_AdjustmentType.enabled(true);
+                    adjustmentGeneral_AdjustmentPeriodId.enabled(true);
+                    adjustmentGeneral_AdjustmentDate.enabled(true);
+                    adjustmentGeneral_AdjustmentIterations.enabled(true);
+                    adjustmentGeneral_AdjustmentDecrease.enabled(true);
+                    adjustmentGeneral_AdjustmentNumber.enabled(true);
+                    adjustmentGeneral_AdjustmentMinPct.enabled(true);
+                    adjustmentGeneral_AdjustmentMaxPct.enabled(true);
+                    adjustmentGeneral_OriginalAmount.enabled(true);
+        
+                    adjustmentPercent.enabled(false);
+                    PMCPrice.adjustmentPct = 0;
+                    adjustmentAmountGr.enabled(false);
+                    PMCPrice.adjustmentAmount = 0;
+                    adjustmentPriceList.enabled(false);
+                    PMCPrice.PriceDate = dateNull();
+
+                    PMCPrice.PriceIndexId = '';
+                    PMCPrice.IndexDate = dateNull();
+                    PMCPrice.FixedBase = NoYes::No;
+                    PMCPrice.BaseIdxDate = dateNull();
+                    PMCPrice.Percentage = 100;
+                    PMCPrice.PriceDate = dateNull();
+                    PMCPrice.PointsEstimated = 0;
+                    adjustmentIndex.enabled(false);
+                    break;
+        
+                case PMCAdjustmentType::MarketPrice:
+                    adjustmentGeneral.enabled(true);
+                    adjustmentGeneral_AdjustmentType.enabled(true);
+                    adjustmentGeneral_AdjustmentPeriodId.enabled(true);
+                    adjustmentGeneral_AdjustmentDate.enabled(true);
+                    adjustmentGeneral_AdjustmentIterations.enabled(true);
+                    adjustmentGeneral_AdjustmentDecrease.enabled(true);
+                    adjustmentGeneral_AdjustmentNumber.enabled(true);
+                    adjustmentGeneral_AdjustmentMinPct.enabled(true);
+                    adjustmentGeneral_AdjustmentMaxPct.enabled(true);
+                    adjustmentGeneral_OriginalAmount.enabled(true);
+        
+                    adjustmentPercent.enabled(false);
+                    PMCPrice.adjustmentPct = 0;
+                    adjustmentAmountGr.enabled(false);
+                    PMCPrice.adjustmentAmount = 0;
+                    adjustmentPriceList.enabled(false);
+                    PMCPrice.PriceDate = dateNull();
+
+                    PMCPrice.PriceIndexId = '';
+                    PMCPrice.IndexDate = dateNull();
+                    PMCPrice.FixedBase = NoYes::No;
+                    PMCPrice.BaseIdxDate = dateNull();
+                    PMCPrice.Percentage = 100;
+                    PMCPrice.PriceDate = dateNull();
+                    PMCPrice.PointsEstimated = 0;
+                    adjustmentIndex.enabled(false);
+                    break;
+        
+                default:
+                    adjustmentGeneral.enabled(true);
+                    adjustmentGeneral_AdjustmentType.enabled(true);
+                    adjustmentGeneral_AdjustmentPeriodId.enabled(true);
+                    adjustmentGeneral_AdjustmentDate.enabled(true);
+                    adjustmentGeneral_AdjustmentIterations.enabled(true);
+                    adjustmentGeneral_AdjustmentDecrease.enabled(true);
+                    adjustmentGeneral_AdjustmentNumber.enabled(true);
+                    adjustmentGeneral_AdjustmentMinPct.enabled(true);
+                    adjustmentGeneral_AdjustmentMaxPct.enabled(true);
+                    adjustmentGeneral_OriginalAmount.enabled(true);
+        
+                    adjustmentPercent.enabled(false);
+                    PMCPrice.adjustmentPct = 0;
+                    adjustmentAmountGr.enabled(false);
+                    PMCPrice.adjustmentAmount = 0;
+                    adjustmentPriceList.enabled(false);
+                    PMCPrice.PriceDate = dateNull();
+
+                    PMCPrice.PriceIndexId = '';
+                    PMCPrice.IndexDate = dateNull();
+                    PMCPrice.FixedBase = NoYes::No;
+                    PMCPrice.BaseIdxDate = dateNull();
+                    PMCPrice.Percentage = 100;
+                    PMCPrice.PriceDate = dateNull();
+                    PMCPrice.PointsEstimated = 0;
+                    adjustmentIndex.enabled(false);
+                    break;
+        
+            }
+
+            if (PMCPrice.RecId)
+            {
+                pmcprice.update();
+            }
+
+            ttscommit;
+
+        
+        }
+
+        public void executeQuery()
+        {
+            QueryBuildRange isRange;
+        
+            isRange = this.query().dataSourceTable(tableNum(PMCPrice)).findRange(fieldNum(PMCPrice, AdjPrevInvoiced));
+            if (!isRange)
+            {
+                isRange = this.query().dataSourceTable(tableNum(PMCPrice)).addRange(fieldNum(PMCPrice, AdjPrevInvoiced));
+            }
+        
+            super();
+        }
+
+        public void displayOption(Common _p1, FormRowDisplayOption _options)
+        {
+            PMCPrice price;
+            ;
+        
+            price = _p1;
+        
+            if (price.RecId)
+            {
+                _options.backColor(userSetting.backColor(price.ValidFrom, price.ValidTo));
+            }
+            super(_p1, _options);
+        }
+
+        public int active()
+        {
+            int ret;
+        
+            ret = super();
+        
+            pmcPrice_ds.setAdjustmentFields();
+        
+            return ret;
+        }
+
+        public void initValue()
+        {
+            super();
+        
+            pmcPrice.PriceRelationType = PMCPriceRelation::ContractLine;
+            pmcPrice.AdjustmentDecrease = PMCAdjustmentAutoLimit::UpOnly;
+            PMCPrice.ValidFrom = PMCContractLine.ValidFrom;
+            PMCPrice.ValidTo = PMCContractLine.ValidTo;
+        }
+
+        [DataField]
+        class AdjustmentType 
+        {
+            public void modified()
+            {
+                super();
+            
+                pmcPrice_ds.setAdjustmentFields();
+            }
+
+        }
+
+    }
+
+    [DataSource]
+    class PMCContractStatusLog
+    {
+        public void initValue()
+        {
+            ;
+        
+            super();
+            pmcContractStatusLog.ContractId = pmcContract.ContractId;
+        }
+
+    }
+
+    [DataSource]
+    class LogisticsPostalAddress
+    {
+        public boolean validateWrite()
+        {
+            return true;
+        }
+
+        public void write()
+        {
+            //super();
+        }
+
+    }
+
+    [DataSource]
+    class PMCContractArea
+    {
+        public void delete()
+        {
+            super();
+            this.updateLines();
+        }
+
+        public void write()
+        {
+            super();
+            this.updateLines();
+        
+        }
+
+        void updateLines()
+        {
+            ;
+            PMCContractArea::updateLineAreas(pmcContractArea.ContractId, pmcContractArea.RentalObjectId);
+        }
+
+    }
+
+    [DataSource]
+    class DirPartyTable
+    {
+        /// <summary>
+        ///
+        /// </summary>
+        public void executeQuery()
+        {
+            RecId partyId = DirPartyTable::findRec(CustTable::find(PMCContract.AccountNum).Party).RecId;
+            this.query().dataSourceTable(tableNum("DirPartyTable")).addRange(fieldNum(DirPartyTable, RecId)).value(queryValue(partyId));
+
+            super();
+        }
+
+    }
+
+    [Control("MenuFunctionButton")]
+    class PMCContractTotals
+    {
+        void clicked()
+        {
+            FormRun totalForm;
+            Args    args;
+        
+            args = new Args(formStr(PMCContractTotalAmounts));
+            args.parm(date2str(currWorkingDate, -1, -1, -1, -1, -1, -1, DateFlags::None));
+            args.record(pmcContract);
+            totalForm = ClassFactory::formRunClassOnClient(args);
+        
+            totalForm.run();
+            totalForm.wait();
+        }
+
+    }
+
+    [Control("String")]
+    class LineViewHeader_AccountNum
+    {
+        public void lookup()
+        {
+            if (PMCContract.AccountType == PMCAccountType::Ledger)
+            {
+                FormStringControl formStringControl;
+
+                formStringControl = element.design().controlname("LineViewHeader_AccountNum");
+                formStringControl.performTypeLookup(extendedtypenum(MainAccountNum));
+            }
+            else
+            {
+                super();
+            }
+
+        }
+
+    }
+
+    [Control("String")]
+    class PMCContractLine_RentalObjectId
+    {
+        public void lookup()
+        {
+            Args arg;
+            FormRun fr;            
+        
+            arg = new Args(formStr(PMERentalObjectLookup2));
+            arg.record(pmcContractLine);
+            arg.caller(element);
+        
+            fr = classfactory.formRunClass(arg);
+            fr.run();
+            fr.wait();
+        }
+
+    }
+
+    [Control("String")]
+    class Rentalobject_PriceListGroupId
+    {
+        public void lookup()
+        {
+            this.performFormLookup(PMCPriceListCl::lookupPriceGroup(pmcContractLine.PriceListId));
+        }
+
+    }
+
+    [Control("ComboBox")]
+    class AdjustmentGeneral_AdjustmentType
+    {
+        /// <summary>
+        ///
+        /// </summary>
+        /// <returns></returns>
+        public boolean modified()
+        {
+            boolean ret;
+    
+            ret = super();
+    
+            PMCPrice_ds.setAdjustmentFields();
+            return ret;
+        }
+
+    }
+
+    [Control("String")]
+    class Reference_MainId
+    {
+        public void lookup()
+        {
+            Args args = new Args(identifierStr(PMCContractLookup));
+            FormRun lookupFormRun;
+        
+            args.parm("");
+            args.caller(this);
+        
+            lookupFormRun = ClassFactory::formRunClassOnClient(args);
+            lookupFormRun.init();
+        
+            reference_MainId.performFormLookup(lookupFormRun);
+            lookupFormRun.wait();
+        }
+
+    }
+
+    [Control("MenuFunctionButton")]
+    class NewAddress
+    {
+        void clicked()
+        {
+            super();
+        
+            this.formRun().arrange();
+        }
+
+    }
+
+    [Control("MenuFunctionButton")]
+    class EditAddress
+    {
+        void clicked()
+        {
+            super();
+            this.formRun().arrange();
+        }
+
+    }
+
+    [Control("TabPage")]
+    class TabPageGrid
+    {
+        public void pageActivated()
+        {
+            validState.setShowAll(ShowAll.value());
+            super();
+        }
+
+    }
+
+    [Control("CheckBox")]
+    class ShowAll
+    {
+        public boolean modified()
+        {
+            boolean ret;
+
+            ret = super();
+
+            validState.setShowAll(ShowAll.value());
+           
+            return ret;
+        }
+
+    }
+
+}
